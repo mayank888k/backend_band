@@ -5,7 +5,7 @@
 flyctl apps create modern-band-api --org personal
 
 # Create a volume for persistent SQLite data
-flyctl volumes create modern_band_data --size 1 --region sin
+flyctl volumes create modern_band_data --size 1 --region bom
 
 # Deploy the application
 flyctl deploy

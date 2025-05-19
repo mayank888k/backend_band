@@ -1,5 +1,5 @@
 app = "modern-band-backend"  # You can change this to your preferred app name
-primary_region = "sin"  # Singapore - change to your preferred region
+primary_region = "bom"  # bombay - change to your preferred region
 
 [build]
 
@@ -14,7 +14,7 @@ primary_region = "sin"  # Singapore - change to your preferred region
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
-  memory_mb = 512
+  memory_mb = 256
 
 [mounts]
   source="modern_band_data"

@@ -16,7 +16,7 @@ RUN CGO_ENABLED=1 GOOS=linux go build -o server ./cmd/api
 FROM alpine:latest
 
 # Install dependencies required for SQLite
-RUN apk add --no-cache ca-certificates libc6-compat
+RUN apk add --no-cache ca-certificates libc6-compat tzdata
 
 WORKDIR /app
 
@@ -28,6 +28,9 @@ COPY --from=builder /app/server .
 
 # Set reasonable permissions
 RUN chmod +x /app/server
+
+# Set timezone
+ENV TZ=Asia/Kolkata
 
 # Expose the port the app runs on
 EXPOSE 8081

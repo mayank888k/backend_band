@@ -32,7 +32,7 @@ This document outlines the steps to deploy the Modern Band Backend to Fly.io wit
 
 2. **Create a persistent volume for SQLite data**
    ```
-   flyctl volumes create modern_band_data --size 1 --region sin
+   flyctl volumes create modern_band_data --size 1 --region bom
    ```
 
 3. **Deploy the application**
