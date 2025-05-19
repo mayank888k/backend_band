@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"os"
 
 	"github.com/gin-gonic/gin"
 )
@@ -50,7 +51,14 @@ func SetupRoutes(router *gin.Engine) {
 
 		// Health check
 		api.GET("/health", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{"status": "UP"})
+			port := "8081"  // Default port
+			if p := os.Getenv("PORT"); p != "" {
+				port = p
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"status": "UP",
+				"message": "Server is running on port " + port,
+			})
 		})
 	}
 
