@@ -35,6 +35,7 @@ func SetupRoutes(router *gin.Engine) {
 
 		// Authentication endpoint
 		api.POST("/login", Login)
+		api.POST("/signin", AdminLogin)
 
 		// Employee endpoints
 		api.POST("/employees", CreateEmployee)

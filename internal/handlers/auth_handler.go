@@ -1,16 +1,18 @@
 package handlers
 
 import (
-	"database/sql"
+	"context"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/modernband/booking/internal/database"
 	"github.com/modernband/booking/internal/models"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// Login handles authentication for both employees and admin users
+// Login handles user authentication (no JWT)
 func Login(c *gin.Context) {
 	var request models.LoginRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
@@ -18,52 +20,83 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	db := database.GetDB()
+	coll := database.GetCollection("employees")
+	ctx := context.Background()
 
-	// First try to find an admin user
-	var adminID int
-	var adminPassword string
-	err := db.QueryRow("SELECT id, password FROM admin_users WHERE username = ?", request.Username).Scan(&adminID, &adminPassword)
-	if err == nil {
-		// Found an admin user, verify password
-		err := bcrypt.CompareHashAndPassword([]byte(adminPassword), []byte(request.Password))
-		if err == nil {
-			// Password is correct
-			c.JSON(http.StatusOK, models.LoginResponse{
-				Username: request.Username,
-				IsAdmin:  true,
-				Message:  "Login successful",
-			})
-			return
+	// Find employee by username
+	var employee models.Employee
+	err := coll.FindOne(ctx, bson.M{"username": request.Username}).Decode(&employee)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error", "details": err.Error()})
 		}
-	} else if err != sql.ErrNoRows {
-		// Some other database error occurred
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error", "details": err.Error()})
 		return
 	}
 
-	// If not found or password incorrect, try employee
-	var employeeID int
-	var employeePassword string
-	err = db.QueryRow("SELECT id, password FROM employees WHERE username = ?", request.Username).Scan(&employeeID, &employeePassword)
-	if err == nil {
-		// Found an employee, verify password
-		err := bcrypt.CompareHashAndPassword([]byte(employeePassword), []byte(request.Password))
-		if err == nil {
-			// Password is correct
-			c.JSON(http.StatusOK, models.LoginResponse{
-				Username: request.Username,
-				IsAdmin:  false,
-				Message:  "Login successful",
-			})
-			return
-		}
-	} else if err != sql.ErrNoRows {
-		// Some other database error occurred
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error", "details": err.Error()})
+	// Verify password
+	err = bcrypt.CompareHashAndPassword([]byte(employee.Password), []byte(request.Password))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
 		return
 	}
 
-	// If we get here, authentication failed
-	c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
+	// Return success response (no token)
+	c.JSON(http.StatusOK, gin.H{
+		"employee": gin.H{
+			"id":                       employee.ID,
+			"name":                     employee.Name,
+			"mobileNumber":             employee.MobileNumber,
+			"email":                    employee.Email,
+			"address":                  employee.Address,
+			"isEmployee":               employee.IsEmployee,
+			"totalAmountToBePaid":      employee.TotalAmountToBePaid,
+			"totalAmountPaidInAdvance": employee.TotalAmountPaidInAdvance,
+			"username":                 employee.Username,
+		},
+	})
+}
+
+// AdminLogin handles admin user authentication (no JWT)
+func AdminLogin(c *gin.Context) {
+	var request models.LoginRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request data", "details": err.Error()})
+		return
+	}
+
+	coll := database.GetCollection("admin_users")
+	ctx := context.Background()
+
+	// Find admin user by username
+	var adminUser models.AdminUser
+	err := coll.FindOne(ctx, bson.M{"username": request.Username}).Decode(&adminUser)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error", "details": err.Error()})
+		}
+		return
+	}
+
+	// Verify password
+	err = bcrypt.CompareHashAndPassword([]byte(adminUser.Password), []byte(request.Password))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
+		return
+	}
+
+	// Return success response (no token)
+	c.JSON(http.StatusOK, gin.H{
+		"admin": gin.H{
+			"id":           adminUser.ID,
+			"name":         adminUser.Name,
+			"mobileNumber": adminUser.MobileNumber,
+			"email":        adminUser.Email,
+			"username":     adminUser.Username,
+			"isAdmin":      adminUser.IsAdminUser,
+		},
+	})
 }

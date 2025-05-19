@@ -1,8 +1,8 @@
 package handlers
 
 import (
+	"context"
 	"crypto/rand"
-	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,6 +11,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/modernband/booking/internal/database"
 	"github.com/modernband/booking/internal/models"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // generateBookingID creates a unique 6-character alphanumeric booking ID
@@ -46,9 +50,8 @@ func generateBookingID() (string, error) {
 }
 
 // checkBookingIDExists checks if a booking ID already exists in the database
-func checkBookingIDExists(db *sql.DB, id string) (bool, error) {
-	var count int
-	err := db.QueryRow("SELECT COUNT(*) FROM bookings WHERE id = ?", id).Scan(&count)
+func checkBookingIDExists(ctx context.Context, coll *mongo.Collection, id string) (bool, error) {
+	count, err := coll.CountDocuments(ctx, bson.M{"booking_id": id})
 	if err != nil {
 		return false, err
 	}
@@ -63,8 +66,9 @@ func CreateBooking(c *gin.Context) {
 		return
 	}
 
-	// Get database connection
-	db := database.GetDB()
+	// Get MongoDB collection
+	coll := database.GetCollection("bookings")
+	ctx := context.Background()
 
 	// Try to generate a unique booking ID up to 5 times
 	var bookingID string
@@ -80,7 +84,7 @@ func CreateBooking(c *gin.Context) {
 		}
 
 		// Check if ID already exists
-		exists, err = checkBookingIDExists(db, bookingID)
+		exists, err = checkBookingIDExists(ctx, coll, bookingID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error", "details": err.Error()})
 			return
@@ -98,37 +102,23 @@ func CreateBooking(c *gin.Context) {
 		}
 	}
 
-	booking.ID = bookingID
+	// Set booking fields
+	booking.BookingID = bookingID
 	booking.CreatedAt = time.Now()
-
-	// Set phone verified to true (OTP verification removed)
 	booking.PhoneVerified = true
 
-	// Save booking to database
-	_, err = db.Exec(`
-		INSERT INTO bookings (
-			id, name, email, phone, additional_phone, package_type, 
-			event_date, venue, city, customization, band_time, 
-			custom_time_slot, number_of_people, number_of_lights, 
-			number_of_dhols, ghoda_baggi, ghodi_for_baraat, 
-			fireworks, fireworks_amount, flower_canon, doli_for_vidai, 
-			amount, advance_payment, phone_verified, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		booking.ID, booking.Name, booking.Email, booking.Phone, booking.AdditionalPhone, booking.PackageType,
-		booking.EventDate.Format(time.RFC3339), booking.Venue, booking.City, booking.Customization, booking.BandTime,
-		booking.CustomTimeSlot, booking.NumberOfPeople, booking.NumberOfLights,
-		booking.NumberOfDhols, booking.GhodaBaggi, booking.GhodiForBaraat,
-		booking.Fireworks, booking.FireworksAmount, booking.FlowerCanon, booking.DoliForVidai,
-		booking.Amount, booking.AdvancePayment, booking.PhoneVerified, booking.CreatedAt.Format(time.RFC3339))
-
+	// Insert booking into MongoDB
+	result, err := coll.InsertOne(ctx, booking)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create booking", "details": err.Error()})
 		return
 	}
 
+	// Set the MongoDB ID
+	booking.ID = result.InsertedID.(primitive.ObjectID)
+
 	// Send booking confirmation (as a log, since we're simulating)
-	log.Printf("BOOKING CONFIRMATION: Dear %s, your booking with Modern Band (ID: %s) has been confirmed! We look forward to making your event special.", booking.Name, booking.ID)
+	log.Printf("BOOKING CONFIRMATION: Dear %s, your booking with Modern Band (ID: %s) has been confirmed! We look forward to making your event special.", booking.Name, booking.BookingID)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "Booking created successfully",
@@ -146,66 +136,33 @@ func GetBooking(c *gin.Context) {
 		return
 	}
 
-	db := database.GetDB()
-	var query string
-	var arg interface{}
+	coll := database.GetCollection("bookings")
+	ctx := context.Background()
 
+	var filter bson.M
 	if bookingID != "" {
-		query = `
-			SELECT id, name, email, phone, additional_phone, package_type, 
-			event_date, venue, city, customization, band_time, 
-			custom_time_slot, number_of_people, number_of_lights, 
-			number_of_dhols, ghoda_baggi, ghodi_for_baraat, 
-			fireworks, fireworks_amount, flower_canon, doli_for_vidai, 
-			amount, advance_payment, phone_verified, created_at
-			FROM bookings WHERE id = ?
-		`
-		arg = bookingID
+		filter = bson.M{"booking_id": bookingID}
 	} else {
-		query = `
-			SELECT id, name, email, phone, additional_phone, package_type, 
-			event_date, venue, city, customization, band_time, 
-			custom_time_slot, number_of_people, number_of_lights, 
-			number_of_dhols, ghoda_baggi, ghodi_for_baraat, 
-			fireworks, fireworks_amount, flower_canon, doli_for_vidai, 
-			amount, advance_payment, phone_verified, created_at
-			FROM bookings WHERE phone = ?
-			ORDER BY created_at DESC
-		`
-		arg = contactNumber
+		filter = bson.M{"phone": contactNumber}
 	}
 
-	rows, err := db.Query(query, arg)
+	// Set options for sorting by created_at in descending order
+	opts := options.Find()
+	if contactNumber != "" {
+		opts.SetSort(bson.D{{"created_at", -1}})
+	}
+
+	cursor, err := coll.Find(ctx, filter, opts)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve booking"})
 		return
 	}
-	defer rows.Close()
+	defer cursor.Close(ctx)
 
 	var bookings []models.Booking
-	for rows.Next() {
-		var booking models.Booking
-		var eventDateStr string
-		var createdAtStr string
-
-		err := rows.Scan(
-			&booking.ID, &booking.Name, &booking.Email, &booking.Phone, &booking.AdditionalPhone, &booking.PackageType,
-			&eventDateStr, &booking.Venue, &booking.City, &booking.Customization, &booking.BandTime,
-			&booking.CustomTimeSlot, &booking.NumberOfPeople, &booking.NumberOfLights,
-			&booking.NumberOfDhols, &booking.GhodaBaggi, &booking.GhodiForBaraat,
-			&booking.Fireworks, &booking.FireworksAmount, &booking.FlowerCanon, &booking.DoliForVidai,
-			&booking.Amount, &booking.AdvancePayment, &booking.PhoneVerified, &createdAtStr,
-		)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse booking data"})
-			return
-		}
-
-		// Parse the dates
-		booking.EventDate, _ = time.Parse(time.RFC3339, eventDateStr)
-		booking.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-
-		bookings = append(bookings, booking)
+	if err = cursor.All(ctx, &bookings); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse booking data"})
+		return
 	}
 
 	if len(bookings) == 0 {
@@ -224,50 +181,23 @@ func GetBooking(c *gin.Context) {
 
 // GetAllBookings retrieves all bookings from the database
 func GetAllBookings(c *gin.Context) {
-	db := database.GetDB()
+	coll := database.GetCollection("bookings")
+	ctx := context.Background()
 
-	query := `
-		SELECT id, name, email, phone, additional_phone, package_type, 
-		event_date, venue, city, customization, band_time, 
-		custom_time_slot, number_of_people, number_of_lights, 
-		number_of_dhols, ghoda_baggi, ghodi_for_baraat, 
-		fireworks, fireworks_amount, flower_canon, doli_for_vidai, 
-		amount, advance_payment, phone_verified, created_at
-		FROM bookings
-		ORDER BY created_at DESC
-	`
+	// Set options for sorting by created_at in descending order
+	opts := options.Find().SetSort(bson.D{{"created_at", -1}})
 
-	rows, err := db.Query(query)
+	cursor, err := coll.Find(ctx, bson.M{}, opts)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve bookings", "details": err.Error()})
 		return
 	}
-	defer rows.Close()
+	defer cursor.Close(ctx)
 
 	var bookings []models.Booking
-	for rows.Next() {
-		var booking models.Booking
-		var eventDateStr string
-		var createdAtStr string
-
-		err := rows.Scan(
-			&booking.ID, &booking.Name, &booking.Email, &booking.Phone, &booking.AdditionalPhone, &booking.PackageType,
-			&eventDateStr, &booking.Venue, &booking.City, &booking.Customization, &booking.BandTime,
-			&booking.CustomTimeSlot, &booking.NumberOfPeople, &booking.NumberOfLights,
-			&booking.NumberOfDhols, &booking.GhodaBaggi, &booking.GhodiForBaraat,
-			&booking.Fireworks, &booking.FireworksAmount, &booking.FlowerCanon, &booking.DoliForVidai,
-			&booking.Amount, &booking.AdvancePayment, &booking.PhoneVerified, &createdAtStr,
-		)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse booking data", "details": err.Error()})
-			return
-		}
-
-		// Parse the dates
-		booking.EventDate, _ = time.Parse(time.RFC3339, eventDateStr)
-		booking.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-
-		bookings = append(bookings, booking)
+	if err = cursor.All(ctx, &bookings); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse booking data", "details": err.Error()})
+		return
 	}
 
 	// Check if any bookings were found
@@ -282,34 +212,7 @@ func GetAllBookings(c *gin.Context) {
 	})
 }
 
-// DeletePastBookings deletes all bookings whose event date is in the past
-func DeletePastBookings(c *gin.Context) {
-	db := database.GetDB()
-
-	// Get current date in RFC3339 format (used by the database)
-	currentDate := time.Now().Format(time.RFC3339)
-
-	// Delete bookings with event_date earlier than current date
-	result, err := db.Exec("DELETE FROM bookings WHERE event_date < ?", currentDate)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete past bookings", "details": err.Error()})
-		return
-	}
-
-	// Get number of affected rows (deleted bookings)
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get number of deleted bookings", "details": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message":       "Past bookings deleted successfully",
-		"deleted_count": rowsAffected,
-	})
-}
-
-// DeleteBooking deletes a specific booking by its ID
+// DeleteBooking deletes a booking by ID
 func DeleteBooking(c *gin.Context) {
 	bookingID := c.Param("id")
 
@@ -321,14 +224,11 @@ func DeleteBooking(c *gin.Context) {
 		return
 	}
 
-	db := database.GetDB()
+	coll := database.GetCollection("bookings")
+	ctx := context.Background()
 
 	// Check if booking exists
-	var count int
-	query := "SELECT COUNT(*) FROM bookings WHERE id = ?"
-	fmt.Printf("Running query: %s with ID: '%s'\n", query, bookingID)
-
-	err := db.QueryRow(query, bookingID).Scan(&count)
+	count, err := coll.CountDocuments(ctx, bson.M{"booking_id": bookingID})
 	if err != nil {
 		fmt.Printf("Database error when checking if booking exists: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error", "details": err.Error()})
@@ -342,10 +242,7 @@ func DeleteBooking(c *gin.Context) {
 	}
 
 	// Delete the booking
-	deleteQuery := "DELETE FROM bookings WHERE id = ?"
-	fmt.Printf("Running delete query: %s with ID: '%s'\n", deleteQuery, bookingID)
-
-	_, err = db.Exec(deleteQuery, bookingID)
+	result, err := coll.DeleteOne(ctx, bson.M{"booking_id": bookingID})
 	if err != nil {
 		fmt.Printf("Database error when deleting booking: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete booking", "details": err.Error()})
@@ -356,5 +253,32 @@ func DeleteBooking(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Booking deleted successfully",
 		"id":      bookingID,
+		"count":   result.DeletedCount,
+	})
+}
+
+// DeletePastBookings deletes all bookings with event dates in the past
+func DeletePastBookings(c *gin.Context) {
+	coll := database.GetCollection("bookings")
+	ctx := context.Background()
+
+	// Calculate the start of today (midnight)
+	now := time.Now()
+	startOfToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	// Delete bookings with event dates from yesterday or older
+	result, err := coll.DeleteMany(ctx, bson.M{
+		"event_date": bson.M{
+			"$lt": startOfToday, // Only delete bookings before today's start (midnight)
+		},
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete past bookings", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Past bookings (before today) deleted successfully",
+		"count":   result.DeletedCount,
 	})
 }

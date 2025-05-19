@@ -21,7 +21,8 @@ func main() {
 	}
 
 	// Initialize database connection
-	_ = database.GetDB() // Initialize SQLite
+	_ = database.GetDB() // Initialize MongoDB connection
+	defer database.Close()
 
 	// Set up the router
 	router := gin.Default()

@@ -1,14 +1,17 @@
 package handlers
 
 import (
-	"database/sql"
+	"context"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/modernband/booking/internal/database"
 	"github.com/modernband/booking/internal/models"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -27,11 +30,11 @@ func CreateEmployee(c *gin.Context) {
 		return
 	}
 
-	db := database.GetDB()
+	coll := database.GetCollection("employees")
+	ctx := context.Background()
 
 	// Check if username already exists
-	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM employees WHERE username = ?", request.Username).Scan(&count)
+	count, err := coll.CountDocuments(ctx, bson.M{"username": request.Username})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error", "details": err.Error()})
 		return
@@ -43,88 +46,76 @@ func CreateEmployee(c *gin.Context) {
 	}
 
 	// Create new employee
-	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := db.Exec(`
-		INSERT INTO employees (
-			name, mobile_number, email, address, is_employee, 
-			total_amount_to_be_paid, total_amount_paid_in_advance, 
-			username, password, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		request.Name, request.MobileNumber, request.Email, request.Address, true,
-		request.TotalAmountToBePaid, request.TotalAmountPaidInAdvance,
-		request.Username, string(hashedPassword), now, now,
-	)
+	now := time.Now()
+	employee := models.Employee{
+		Name:                     request.Name,
+		MobileNumber:             request.MobileNumber,
+		Email:                    request.Email,
+		Address:                  request.Address,
+		IsEmployee:               true,
+		TotalAmountToBePaid:      request.TotalAmountToBePaid,
+		TotalAmountPaidInAdvance: request.TotalAmountPaidInAdvance,
+		Username:                 request.Username,
+		Password:                 string(hashedPassword),
+		CreatedAt:                now,
+		UpdatedAt:                now,
+	}
 
+	result, err := coll.InsertOne(ctx, employee)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create employee", "details": err.Error()})
 		return
 	}
 
-	// Get the ID of the newly created employee
-	id, err := result.LastInsertId()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get employee ID", "details": err.Error()})
-		return
-	}
+	employee.ID = result.InsertedID.(primitive.ObjectID)
 
-	// Return success response without exposing the password
 	c.JSON(http.StatusCreated, gin.H{
-		"message": "Employee created successfully",
-		"employee": models.EmployeeResponse{
-			ID:                       uint(id),
-			Name:                     request.Name,
-			MobileNumber:             request.MobileNumber,
-			Email:                    request.Email,
-			Address:                  request.Address,
-			TotalAmountToBePaid:      request.TotalAmountToBePaid,
-			TotalAmountPaidInAdvance: request.TotalAmountPaidInAdvance,
-			Username:                 request.Username,
-			IsEmployee:               true,
-			Payments:                 []models.Payment{},
-		},
+		"message":  "Employee created successfully",
+		"employee": employee,
 	})
 }
 
-// GetAllEmployees returns a list of all employees
+// GetAllEmployees retrieves all employees from the database
 func GetAllEmployees(c *gin.Context) {
-	db := database.GetDB()
+	coll := database.GetCollection("employees")
+	ctx := context.Background()
 
-	rows, err := db.Query(`
-		SELECT id, name, mobile_number, email, address, 
-		is_employee, total_amount_to_be_paid, total_amount_paid_in_advance, 
-		username, created_at, updated_at 
-		FROM employees
-	`)
+	// Set options for sorting by created_at in descending order
+	opts := options.Find().SetSort(bson.M{"created_at": -1})
+
+	cursor, err := coll.Find(ctx, bson.M{}, opts)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve employees", "details": err.Error()})
 		return
 	}
-	defer rows.Close()
+	defer cursor.Close(ctx)
 
-	var employees []models.EmployeeResponse
-	for rows.Next() {
-		var employee models.EmployeeResponse
-		var id int
-		var createdAt, updatedAt string
+	// First decode into full Employee structs
+	var employees []models.Employee
+	if err = cursor.All(ctx, &employees); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse employee data", "details": err.Error()})
+		return
+	}
 
-		err := rows.Scan(
-			&id, &employee.Name, &employee.MobileNumber, &employee.Email, &employee.Address,
-			&employee.IsEmployee, &employee.TotalAmountToBePaid, &employee.TotalAmountPaidInAdvance,
-			&employee.Username, &createdAt, &updatedAt,
-		)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse employee data", "details": err.Error()})
-			return
-		}
-
-		employee.ID = uint(id)
-		employees = append(employees, employee)
+	// Convert to EmployeeResponse structs
+	var response []models.EmployeeResponse
+	for _, emp := range employees {
+		response = append(response, models.EmployeeResponse{
+			ID:                       emp.ID,
+			Name:                     emp.Name,
+			MobileNumber:             emp.MobileNumber,
+			Email:                    emp.Email,
+			Address:                  emp.Address,
+			IsEmployee:               emp.IsEmployee,
+			TotalAmountToBePaid:      emp.TotalAmountToBePaid,
+			TotalAmountPaidInAdvance: emp.TotalAmountPaidInAdvance,
+			Username:                 emp.Username,
+		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"employees": employees,
-		"count":     len(employees),
+		"employees": response,
+		"count":     len(response),
 	})
 }
 
@@ -136,13 +127,15 @@ func DeleteEmployee(c *gin.Context) {
 		return
 	}
 
-	db := database.GetDB()
+	coll := database.GetCollection("employees")
+	paymentsColl := database.GetCollection("payments")
+	ctx := context.Background()
 
-	// Check if employee exists
-	var id int
-	err := db.QueryRow("SELECT id FROM employees WHERE username = ?", username).Scan(&id)
+	// Find employee by username
+	var employee models.Employee
+	err := coll.FindOne(ctx, bson.M{"username": username}).Decode(&employee)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == mongo.ErrNoDocuments {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Employee not found"})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error", "details": err.Error()})
@@ -150,32 +143,33 @@ func DeleteEmployee(c *gin.Context) {
 		return
 	}
 
-	// Begin transaction
-	tx, err := db.Begin()
+	// Start a session for transaction
+	session, err := database.GetDB().Client().StartSession()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to begin transaction", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start session", "details": err.Error()})
 		return
 	}
+	defer session.EndSession(ctx)
 
-	// Delete associated payments
-	_, err = tx.Exec("DELETE FROM payments WHERE employee_id = ?", id)
-	if err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete employee payments", "details": err.Error()})
-		return
-	}
+	// Perform transaction
+	_, err = session.WithTransaction(ctx, func(sessCtx mongo.SessionContext) (interface{}, error) {
+		// Delete associated payments
+		_, err := paymentsColl.DeleteMany(sessCtx, bson.M{"employee_id": employee.ID})
+		if err != nil {
+			return nil, err
+		}
 
-	// Delete employee
-	_, err = tx.Exec("DELETE FROM employees WHERE id = ?", id)
+		// Delete employee
+		_, err = coll.DeleteOne(sessCtx, bson.M{"_id": employee.ID})
+		if err != nil {
+			return nil, err
+		}
+
+		return nil, nil
+	})
+
 	if err != nil {
-		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete employee", "details": err.Error()})
-		return
-	}
-
-	// Commit transaction
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction", "details": err.Error()})
 		return
 	}
 
@@ -198,13 +192,15 @@ func AddPayment(c *gin.Context) {
 		return
 	}
 
-	db := database.GetDB()
+	coll := database.GetCollection("employees")
+	paymentsColl := database.GetCollection("payments")
+	ctx := context.Background()
 
 	// Find employee by username
-	var employeeID int
-	err := db.QueryRow("SELECT id FROM employees WHERE username = ?", username).Scan(&employeeID)
+	var employee models.Employee
+	err := coll.FindOne(ctx, bson.M{"username": username}).Decode(&employee)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == mongo.ErrNoDocuments {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Employee not found"})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error", "details": err.Error()})
@@ -220,32 +216,24 @@ func AddPayment(c *gin.Context) {
 	}
 
 	// Create payment
-	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := db.Exec(
-		"INSERT INTO payments (amount_paid, date, employee_id, created_at) VALUES (?, ?, ?, ?)",
-		request.AmountPaid, date.Format(time.RFC3339), employeeID, now,
-	)
+	payment := models.Payment{
+		AmountPaid: request.AmountPaid,
+		Date:       date,
+		EmployeeID: employee.ID,
+		CreatedAt:  time.Now(),
+	}
+
+	result, err := paymentsColl.InsertOne(ctx, payment)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create payment", "details": err.Error()})
 		return
 	}
 
-	// Get the ID of the newly created payment
-	paymentID, err := result.LastInsertId()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get payment ID", "details": err.Error()})
-		return
-	}
+	payment.ID = result.InsertedID.(primitive.ObjectID)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "Payment added successfully",
-		"payment": models.Payment{
-			ID:         uint(paymentID),
-			AmountPaid: request.AmountPaid,
-			Date:       date,
-			EmployeeID: uint(employeeID),
-			CreatedAt:  time.Now(),
-		},
+		"payment": payment,
 	})
 }
 
@@ -253,25 +241,27 @@ func AddPayment(c *gin.Context) {
 func DeletePayment(c *gin.Context) {
 	username := c.Param("username")
 	paymentIDStr := c.Param("paymentID")
+
 	if username == "" || paymentIDStr == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Username and payment ID are required"})
 		return
 	}
 
-	// Parse payment ID
-	paymentID, err := strconv.Atoi(paymentIDStr)
+	paymentID, err := primitive.ObjectIDFromHex(paymentIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payment ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payment ID format"})
 		return
 	}
 
-	db := database.GetDB()
+	coll := database.GetCollection("employees")
+	paymentsColl := database.GetCollection("payments")
+	ctx := context.Background()
 
 	// Find employee by username
-	var employeeID int
-	err = db.QueryRow("SELECT id FROM employees WHERE username = ?", username).Scan(&employeeID)
+	var employee models.Employee
+	err = coll.FindOne(ctx, bson.M{"username": username}).Decode(&employee)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == mongo.ErrNoDocuments {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Employee not found"})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error", "details": err.Error()})
@@ -279,22 +269,18 @@ func DeletePayment(c *gin.Context) {
 		return
 	}
 
-	// Find and delete payment
-	result, err := db.Exec("DELETE FROM payments WHERE id = ? AND employee_id = ?", paymentID, employeeID)
+	// Delete payment
+	result, err := paymentsColl.DeleteOne(ctx, bson.M{
+		"_id":         paymentID,
+		"employee_id": employee.ID,
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete payment", "details": err.Error()})
 		return
 	}
 
-	// Check if payment was found and deleted
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get affected rows", "details": err.Error()})
-		return
-	}
-
-	if rowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Payment not found for this employee"})
+	if result.DeletedCount == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Payment not found"})
 		return
 	}
 
@@ -303,7 +289,7 @@ func DeletePayment(c *gin.Context) {
 	})
 }
 
-// GetEmployeeDetails gets detailed employee info including payments
+// GetEmployeeDetails retrieves detailed information about an employee
 func GetEmployeeDetails(c *gin.Context) {
 	username := c.Param("username")
 	if username == "" {
@@ -311,25 +297,15 @@ func GetEmployeeDetails(c *gin.Context) {
 		return
 	}
 
-	db := database.GetDB()
+	coll := database.GetCollection("employees")
+	paymentsColl := database.GetCollection("payments")
+	ctx := context.Background()
 
 	// Find employee by username
-	var employee models.EmployeeResponse
-	var id int
-	var createdAt, updatedAt string
-
-	err := db.QueryRow(`
-		SELECT id, name, mobile_number, email, address, 
-		is_employee, total_amount_to_be_paid, total_amount_paid_in_advance, 
-		username, created_at, updated_at 
-		FROM employees WHERE username = ?
-	`, username).Scan(
-		&id, &employee.Name, &employee.MobileNumber, &employee.Email, &employee.Address,
-		&employee.IsEmployee, &employee.TotalAmountToBePaid, &employee.TotalAmountPaidInAdvance,
-		&employee.Username, &createdAt, &updatedAt,
-	)
+	var employee models.Employee
+	err := coll.FindOne(ctx, bson.M{"username": username}).Decode(&employee)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == mongo.ErrNoDocuments {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Employee not found"})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error", "details": err.Error()})
@@ -337,45 +313,33 @@ func GetEmployeeDetails(c *gin.Context) {
 		return
 	}
 
-	employee.ID = uint(id)
-
 	// Get employee payments
-	rows, err := db.Query(`
-		SELECT id, amount_paid, date, created_at 
-		FROM payments 
-		WHERE employee_id = ?
-		ORDER BY date DESC
-	`, id)
+	cursor, err := paymentsColl.Find(ctx, bson.M{"employee_id": employee.ID}, options.Find().SetSort(bson.D{{Key: "date", Value: -1}}))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve payments", "details": err.Error()})
 		return
 	}
-	defer rows.Close()
+	defer cursor.Close(ctx)
 
 	var payments []models.Payment
-	for rows.Next() {
-		var payment models.Payment
-		var paymentID int
-		var dateStr, createdAtStr string
-
-		err := rows.Scan(&paymentID, &payment.AmountPaid, &dateStr, &createdAtStr)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse payment data", "details": err.Error()})
-			return
-		}
-
-		payment.ID = uint(paymentID)
-		payment.EmployeeID = uint(id)
-		payment.Date, _ = time.Parse(time.RFC3339, dateStr)
-		payment.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-
-		payments = append(payments, payment)
+	if err = cursor.All(ctx, &payments); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse payment data", "details": err.Error()})
+		return
 	}
 
-	employee.Payments = payments
+	// Create response
+	response := models.EmployeeResponse{
+		ID:                       employee.ID,
+		Name:                     employee.Name,
+		MobileNumber:             employee.MobileNumber,
+		Email:                    employee.Email,
+		Address:                  employee.Address,
+		IsEmployee:               employee.IsEmployee,
+		TotalAmountToBePaid:      employee.TotalAmountToBePaid,
+		TotalAmountPaidInAdvance: employee.TotalAmountPaidInAdvance,
+		Username:                 employee.Username,
+		Payments:                 payments,
+	}
 
-	// Return employee details with payments
-	c.JSON(http.StatusOK, gin.H{
-		"employee": employee,
-	})
+	c.JSON(http.StatusOK, response)
 }
